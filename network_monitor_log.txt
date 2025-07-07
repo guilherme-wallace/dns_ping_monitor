@@ -1,2 +1,0 @@
-[2025-07-07 15:04:35] Aplicação iniciada.
-[2025-07-07 15:04:50] Alvo '8.8.8.8' já existe ou é inválido.
