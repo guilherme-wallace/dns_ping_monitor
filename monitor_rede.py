@@ -10,6 +10,7 @@ import dns.resolver
 import sys
 import json
 import datetime
+from fpdf import FPDF
 
 # --- Configuração de Logging ---
 LOG_FILE = "network_monitor_log.txt"
@@ -127,7 +128,7 @@ def get_network_details():
             adapter_details = mac_to_details_map[netifaces_mac]
             display_name = adapter_details["description"]
         else:
-            pass # Corrected indentation: 'pass' now correctly belongs to 'else'
+            pass
 
         info = {
             "ipv4_addresses": [],
@@ -174,6 +175,41 @@ def get_public_ip():
         return data["ip"]
     except requests.exceptions.RequestException as e:
         return f"Erro ao obter IP público: {e}"
+
+# Função para realizar consulta DNS com dnspython e medir latência
+def perform_dns_query_with_latency(target_address, dns_servers=None):
+    query_time_ms = "N/A"
+    resolved_ips = []
+    server_used = "N/A"
+    
+    resolver = dns.resolver.Resolver()
+    if dns_servers:
+        resolver.nameservers = dns_servers
+    
+    start_time = time.perf_counter()
+    try:
+        answers = resolver.resolve(target_address, 'A')
+        end_time = time.perf_counter()
+        query_time_ms = f"{(end_time - start_time) * 1000:.2f}ms"
+        
+        for rdata in answers:
+            resolved_ips.append(str(rdata))
+        
+        if resolver.nameservers:
+            server_used = resolver.nameservers[0]
+            
+    except dns.resolver.NXDOMAIN:
+        resolved_ips.append("Domínio não encontrado")
+    except dns.resolver.Timeout:
+        resolved_ips.append("Tempo limite da consulta DNS")
+    except Exception as e:
+        resolved_ips.append(f"Erro na consulta DNS: {e}")
+        
+    return {
+        "query_time": query_time_ms,
+        "resolved_ips": resolved_ips,
+        "server_used": server_used
+    }
 
 # --- 2. Função de Ping ---
 def ping_address(target_address):
@@ -287,18 +323,20 @@ class NetworkMonitorApp:
         self.network_info_frames = {} 
         self.ping_result_labels = {} 
         self.ping_dns_buttons = {}
-        self.overall_statistics_content = "Nenhum teste realizado."
+        self.overall_statistics_content = "Nenhum teste realizado. \n AVISO: O ping deve ser iniciado e finalizado para gerar estatísticas."
         self.system_dns_servers_at_load = "N/A"
+        self.last_network_details = {}
 
         self.ping_targets = {
             "DNS Google (8.8.8.8)": "8.8.8.8",
             "DNS Cloudflare (1.1.1.1)": "1.1.1.1",
-            "Conteúdo 01 (google.com)": "google.com",
-            "Conteúdo 02 (youtube.com)": "youtube.com", 
-            "Conteúdo 03 (facebook.com)": "facebook.com",
-            "Conteúdo 04 (amazon.com)": "amazon.com",
-            "Conteúdo 05 (microsoft.com)": "microsoft.com",
-            "Conteúdo 05 (www.terra.com.br)": "www.terra.com.br",
+            "DNS OpenDNS (208.67.222.222)": "208.67.222.222",
+            "google.com": "google.com",
+            "youtube.com": "youtube.com", 
+            "facebook.com": "facebook.com",
+            "amazon.com": "amazon.com",
+            "microsoft.com": "microsoft.com",
+            "www.terra.com.br": "www.terra.com.br",
         }
 
         self.setup_ui()
@@ -329,11 +367,10 @@ class NetworkMonitorApp:
         self.system_dns_label = ctk.CTkLabel(self.top_info_main_frame, text="Carregando...", font=ctk.CTkFont(size=16), wraplength=400, justify="left")
         self.system_dns_label.grid(row=1, column=1, sticky="nw", pady=5, padx=10)
         
-        self.adapter_info_container = ctk.CTkFrame(self.top_info_main_frame, fg_color="transparent")
-        self.adapter_info_container.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=10)
-        self.adapter_info_container.grid_columnconfigure(0, weight=1)
-        self.adapter_info_container.grid_columnconfigure(1, weight=1)
-        self.top_info_main_frame.grid_columnconfigure(1, weight=1)
+        self.show_adapters_button = ctk.CTkButton(self.top_info_main_frame, text="Ver Adaptadores de Rede", 
+                                                  command=self.show_network_adapters_modal, 
+                                                  font=ctk.CTkFont(size=13, weight="bold"), corner_radius=8)
+        self.show_adapters_button.grid(row=2, column=0, columnspan=2, pady=10, padx=10, sticky="ew")
 
         add_target_frame = ctk.CTkFrame(main_frame, corner_radius=10)
         add_target_frame.grid(row=1, column=0, columnspan=2, pady=10, padx=15, sticky="ew")
@@ -439,27 +476,43 @@ class NetworkMonitorApp:
         self.result_queue.put({"type": "network_details", "value": network_details})
 
     def update_network_info_ui(self, network_details):
-        for widget in self.adapter_info_container.winfo_children():
-            widget.destroy()
-        self.network_info_frames.clear()
+        self.last_network_details = network_details 
 
         self.public_ip_label.configure(text=network_details["public_ipv4"])
         self.system_dns_label.configure(text=network_details["system_dns_servers_str"])
         self.system_dns_servers_at_load = network_details["system_dns_servers_str"]
 
+    def show_network_adapters_modal(self):
+        modal_window = ctk.CTkToplevel(self.master)
+        modal_window.title("Detalhes dos Adaptadores de Rede")
+        modal_window.geometry("800x600")
+        modal_window.transient(self.master) 
+        modal_window.grab_set() 
+
+        self.master.update_idletasks() 
+        x = self.master.winfo_x() + (self.master.winfo_width() // 2) - (modal_window.winfo_width() // 2)
+        y = self.master.winfo_y() + (self.master.winfo_height() // 2) - (modal_window.winfo_height() // 2)
+        modal_window.geometry(f"+{x}+{y}")
+
+        modal_scroll_frame = ctk.CTkScrollableFrame(modal_window, corner_radius=8)
+        modal_scroll_frame.pack(expand=True, fill="both", padx=10, pady=10)
+        modal_scroll_frame.grid_columnconfigure(0, weight=1)
+        modal_scroll_frame.grid_columnconfigure(1, weight=1)
+
+        network_details = self.last_network_details 
+        
         row_count = 0
         col_count = 0
-        max_cols = 2
+        max_cols = 2 
 
-        if network_details["adapters"]:
+        if network_details.get("adapters"):
             sorted_adapter_names = sorted(network_details["adapters"].keys()) 
 
             for adapter_name in sorted_adapter_names:
                 info = network_details["adapters"].get(adapter_name)
                 if info:
-                    adapter_frame = ctk.CTkFrame(self.adapter_info_container, corner_radius=8)
+                    adapter_frame = ctk.CTkFrame(modal_scroll_frame, corner_radius=8)
                     adapter_frame.grid(row=row_count, column=col_count, sticky="nsew", padx=5, pady=5)
-                    self.network_info_frames[adapter_name] = adapter_frame
 
                     ctk.CTkLabel(adapter_frame, text=adapter_name, font=ctk.CTkFont(size=13, weight="bold")).grid(row=0, column=0, columnspan=2, sticky="nw", padx=5, pady=(5,0))
                     
@@ -485,7 +538,13 @@ class NetworkMonitorApp:
                         col_count = 0
                         row_count += 1
         else:
-            ctk.CTkLabel(self.adapter_info_container, text="Nenhum adaptador de rede com IP encontrado.", font=ctk.CTkFont(size=12), text_color="red").pack(pady=10)
+            ctk.CTkLabel(modal_scroll_frame, text="Nenhum adaptador de rede com IP encontrado.", font=ctk.CTkFont(size=14), text_color="red").pack(pady=10)
+
+        close_button = ctk.CTkButton(modal_window, text="Fechar", command=modal_window.destroy, corner_radius=8, font=ctk.CTkFont(size=13, weight="bold"))
+        close_button.pack(pady=10)
+
+        modal_window.protocol("WM_DELETE_WINDOW", modal_window.destroy) 
+        modal_window.wait_window(modal_window)
 
     def start_ping(self):
         self.running = True
@@ -493,7 +552,7 @@ class NetworkMonitorApp:
         self.stop_button.configure(state="normal")
         self.ping_history.clear() 
         self.current_ping_stats = {target: {"sent": 0, "received": 0, "lost": 0} for target in self.ping_targets.values()} 
-        self.overall_statistics_content = "Nenhum teste realizado." 
+        self.overall_statistics_content = "Nenhum teste realizado. \n AVISO: O ping deve ser iniciado e finalizado para gerar estatísticas." 
         
         for target_address, label in self.ping_result_labels.items():
             label.configure(text="Aguardando...\nIP: N/A\nEnviados: 0, Recebidos: 0\nPerdidos: 0 (0%)") 
@@ -593,7 +652,7 @@ class NetworkMonitorApp:
     def generate_overall_statistics(self):
         stats_output = "--- Estatísticas Gerais ---\n"
         if not self.ping_history:
-            stats_output += "Nenhum teste realizado.\n"
+            stats_output += "Nenhum teste realizado. \n AVISO: O ping deve ser iniciado e finalizado para gerar estatísticas.\n"
         else:
             aggregated_stats = {}
             for entry in self.ping_history:
@@ -661,7 +720,7 @@ class NetworkMonitorApp:
     def show_nslookup_modal(self, target_address):
         modal_window = ctk.CTkToplevel(self.master)
         modal_window.title(f"Informações DNS para: {target_address}")
-        modal_window.geometry("600x400")
+        modal_window.geometry("600x450")
         modal_window.transient(self.master) 
         modal_window.grab_set() 
 
@@ -675,20 +734,150 @@ class NetworkMonitorApp:
         
         text_widget = ctk.CTkTextbox(modal_window, wrap="word", font=('Consolas', 14), corner_radius=8)
         
-        def _run_nslookup_and_update_modal():
+        def _run_dns_info_and_update_modal():
             nslookup_output = perform_nslookup(target_address)
+            
+            full_dns_query_output = "--- Tempo de Consulta DNS ---\n"
+            system_dns_servers_list = self.system_dns_servers_at_load.split(' || ')
+            
+            if system_dns_servers_list and system_dns_servers_list[0] != 'N/A':
+                for dns_server in system_dns_servers_list:
+                    dns_query_info = perform_dns_query_with_latency(target_address, [dns_server])
+                    full_dns_query_output += (
+                        f"  Servidor Utilizado: {dns_query_info['server_used']}\n"
+                        f"  Tempo: {dns_query_info['query_time']}\n"
+                        f"  IPs Resolvidos: {', '.join(dns_query_info['resolved_ips']) if dns_query_info['resolved_ips'] else 'N/A'}\n"
+                        f"  \n---\n"
+                    )
+            else:
+                full_dns_query_output += "  Servidores DNS do sistema não disponíveis para teste de latência.\n"
+            
+            full_output = f"{full_dns_query_output}\n--- nslookup ---\n{nslookup_output}"
+
             loading_label.destroy()
             text_widget.pack(expand=True, fill="both", padx=10, pady=10)
-            text_widget.insert("end", nslookup_output)
+            text_widget.insert("end", full_output)
             text_widget.configure(state="disabled")
 
             close_button = ctk.CTkButton(modal_window, text="Fechar", command=modal_window.destroy, corner_radius=8, font=ctk.CTkFont(size=13, weight="bold"))
             close_button.pack(pady=10)
 
-        threading.Thread(target=_run_nslookup_and_update_modal, daemon=True).start()
+        threading.Thread(target=_run_dns_info_and_update_modal, daemon=True).start()
 
         modal_window.protocol("WM_DELETE_WINDOW", modal_window.destroy) 
         modal_window.wait_window(modal_window)
+
+    def generate_pdf_report(self):
+        """
+        Gera um relatório PDF com todas as informações da aplicação.
+        """
+        loading_modal = ctk.CTkToplevel(self.master)
+        loading_modal.title("Gerando PDF")
+        loading_modal.geometry("300x150")
+        loading_modal.transient(self.master)
+        loading_modal.grab_set()
+        loading_label = ctk.CTkLabel(loading_modal, text="Gerando relatório PDF...\nIsso pode levar um momento.", font=ctk.CTkFont(size=14), wraplength=250, justify="center")
+        loading_label.pack(expand=True, fill="both", padx=10, pady=10)
+        
+        def _generate_pdf_async():
+            try:
+                pdf = FPDF()
+                pdf.add_page()
+                pdf.set_font("Arial", size=12)
+
+                pdf.set_font("Arial", "B", 20)
+                pdf.cell(0, 10, "Relatório de Monitoramento de Rede", 0, 1, "C")
+                pdf.ln(10)
+
+                pdf.set_font("Arial", "B", 14)
+                pdf.cell(0, 10, "Informações Gerais da Rede", 0, 1, "L")
+                pdf.set_font("Arial", size=12)
+                pdf.cell(0, 7, f"IP Público: {self.last_network_details.get('public_ipv4', 'N/A')}", 0, 1)
+                pdf.cell(0, 7, f"Servidores DNS do Sistema: {self.last_network_details.get('system_dns_servers_str', 'N/A')}", 0, 1)
+                pdf.ln(5)
+
+                pdf.set_font("Arial", "B", 14)
+                pdf.cell(0, 10, "Detalhes dos Adaptadores de Rede", 0, 1, "L")
+                if self.last_network_details.get("adapters"):
+                    for adapter_name, info in self.last_network_details["adapters"].items():
+                        pdf.set_font("Arial", "B", 12)
+                        pdf.cell(0, 7, f"Adaptador: {adapter_name}", 0, 1)
+                        pdf.set_font("Arial", size=10)
+                        pdf.cell(0, 5, f"  IPv4: {info.get('ipv4', 'N/A')}", 0, 1)
+                        pdf.cell(0, 5, f"  IPv6: {info.get('ipv6', 'N/A')}", 0, 1)
+                        pdf.cell(0, 5, f"  Gateway: {info.get('gateway', 'N/A')}", 0, 1)
+                        pdf.cell(0, 5, f"  Status: {info.get('status', 'N/A')}", 0, 1)
+                        pdf.cell(0, 5, f"  Velocidade: {info.get('speed', 'N/A')}", 0, 1)
+                        pdf.ln(3)
+                else:
+                    pdf.set_font("Arial", size=12)
+                    pdf.cell(0, 7, "Nenhum adaptador de rede encontrado.", 0, 1)
+                pdf.ln(5)
+
+                pdf.set_font("Arial", "B", 14)
+                pdf.cell(0, 10, "Estatísticas de Ping", 0, 1, "L")
+                pdf.set_font("Arial", size=12)
+                if not self.ping_history:
+                    pdf.cell(0, 7, "Nenhum teste de ping realizado.", 0, 1)
+                else:
+                    aggregated_stats = {}
+                    for entry in self.ping_history:
+                        target_address = entry.get('target_address')
+                        target_name = entry.get('target_name')
+                        if target_address:
+                            stats = aggregated_stats.setdefault(target_address, {"name": target_name, "sent": 0, "received": 0, "lost": 0, "rtts": []})
+                            stats["sent"] += entry.get("sent", 0)
+                            stats["received"] += entry.get("received", 0)
+                            stats["lost"] += entry.get("lost", 0)
+                            rtt_str = entry.get("rtt", "N/A")
+                            if rtt_str not in ("N/A", "Tempo limite", "Host não encontrado", "Falha desconhecida", "Erro:"):
+                                match = re.search(r'(\d+)', rtt_str)
+                                if match:
+                                    stats["rtts"].append(int(match.group(1)))
+                    
+                    sorted_targets = sorted(aggregated_stats.keys(), key=lambda k: aggregated_stats[k]["name"])
+
+                    for target_address in sorted_targets:
+                        stats = aggregated_stats[target_address]
+                        name = stats["name"]
+                        sent = stats.get("sent", 0)
+                        received = stats.get("received", 0)
+                        lost = stats.get("lost", 0)
+                        loss_percent = (lost / sent * 100) if sent > 0 else 0
+                        if sent == 0 and lost == 0: 
+                            loss_percent = 0
+
+                        rtts = stats.get("rtts", [])
+                        min_rtt = f"{min(rtts)}ms" if rtts else "N/A"
+                        max_rtt = f"{max(rtts)}ms" if rtts else "N/A"
+                        avg_rtt = f"{sum(rtts) / len(rtts):.1f}ms" if rtts else "N/A"
+                        
+                        pdf.set_font("Arial", "B", 12)
+                        pdf.cell(0, 7, f"Alvo: {name} ({target_address})", 0, 1)
+                        pdf.set_font("Arial", size=10)
+                        pdf.cell(0, 5, f"  Pacotes Enviados: {sent}, Recebidos: {received}, Perdidos: {lost}", 0, 1)
+                        pdf.cell(0, 5, f"  Perda: {loss_percent:.1f}%", 0, 1)
+                        pdf.cell(0, 5, f"  RTT Mín: {min_rtt}, Máx: {max_rtt}, Média: {avg_rtt}", 0, 1)
+                        pdf.ln(3)
+
+                from tkinter import filedialog
+                file_path = filedialog.asksaveasfilename(defaultextension=".pdf",
+                                                        filetypes=[("PDF files", "*.pdf")],
+                                                        title="Salvar Relatório de Rede")
+                if file_path:
+                    pdf.output(file_path)
+                    self.show_info_modal("PDF Gerado", f"Relatório salvo em:\n{file_path}")
+                else:
+                    self.show_info_modal("PDF Cancelado", "A geração do relatório PDF foi cancelada.")
+
+            except Exception as e:
+                self.show_info_modal("Erro ao Gerar PDF", f"Ocorreu um erro: {e}")
+                log_message(f"Erro ao gerar PDF: {e}")
+            finally:
+                loading_modal.destroy()
+
+        threading.Thread(target=_generate_pdf_async, daemon=True).start()
+
 
     def show_statistics_modal(self):
         modal_window = ctk.CTkToplevel(self.master)
@@ -707,6 +896,10 @@ class NetworkMonitorApp:
         
         text_widget.insert("end", self.overall_statistics_content)
         text_widget.configure(state="disabled") 
+
+        pdf_button = ctk.CTkButton(modal_window, text="Gerar Relatório PDF", command=self.generate_pdf_report, 
+                                   corner_radius=8, font=ctk.CTkFont(size=13, weight="bold"))
+        pdf_button.pack(pady=(0, 10))
 
         close_button = ctk.CTkButton(modal_window, text="Fechar", command=modal_window.destroy, corner_radius=8, font=ctk.CTkFont(size=13, weight="bold"))
         close_button.pack(pady=10)
