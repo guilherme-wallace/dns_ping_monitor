@@ -11,8 +11,11 @@ import sys
 import json
 import datetime
 from fpdf import FPDF
+from PIL import Image, ImageTk, ImageDraw
+import webbrowser
+import shutil
+import os
 
-# --- Configuração de Logging ---
 LOG_FILE = "network_monitor_log.txt"
 
 def log_message(message):
@@ -21,8 +24,6 @@ def log_message(message):
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(log_entry)
     print(log_entry.strip())
-
-# --- 1. Funções de Obtenção de Informações de Rede ---
 
 def normalize_mac(mac_str):
     if mac_str:
@@ -176,7 +177,6 @@ def get_public_ip():
     except requests.exceptions.RequestException as e:
         return f"Erro ao obter IP público: {e}"
 
-# Função para realizar consulta DNS com dnspython e medir latência
 def perform_dns_query_with_latency(target_address, dns_servers=None):
     query_time_ms = "N/A"
     resolved_ips = []
@@ -211,7 +211,6 @@ def perform_dns_query_with_latency(target_address, dns_servers=None):
         "server_used": server_used
     }
 
-# --- 2. Função de Ping ---
 def ping_address(target_address):
     ping_result = {
         "rtt": "N/A",
@@ -301,13 +300,17 @@ def perform_nslookup(target_address):
     except Exception as e:
         return f"Erro ao executar nslookup: {e}"
 
-# --- 3. Classe da Aplicação GUI ---
 class NetworkMonitorApp:
     def __init__(self, master):
         self.master = master
-        master.title("Monitor de Latência de Rede")
+        master.title("DNS_Ping Monitor de Rede")
         master.geometry("900x750")
         master.resizable(True, True)
+
+        try:
+            self.master.iconbitmap("public/favicon.ico")
+        except Exception as e:
+            log_message(f"Could not load favicon.ico: {e}")
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
@@ -319,6 +322,7 @@ class NetworkMonitorApp:
         self.result_queue = Queue()
         self.ping_history = []
         self.current_ping_stats = {}
+        self.timer_id = None
 
         self.network_info_frames = {} 
         self.ping_result_labels = {} 
@@ -355,22 +359,37 @@ class NetworkMonitorApp:
         main_frame.grid_rowconfigure(1, weight=0)
         main_frame.grid_rowconfigure(2, weight=1)
         main_frame.grid_rowconfigure(3, weight=0)
+        main_frame.grid_rowconfigure(4, weight=0)
 
         self.top_info_main_frame = ctk.CTkFrame(main_frame, corner_radius=10)
         self.top_info_main_frame.grid(row=0, column=0, columnspan=2, pady=15, padx=15, sticky="ew")
+        self.top_info_main_frame.grid_columnconfigure(0, weight=1)
+        self.top_info_main_frame.grid_columnconfigure(1, weight=0)
+
+        try:
+            logo_image = Image.open("public/logo.png")
+            logo_image = logo_image.resize((180, 60), Image.LANCZOS) 
+            self.ctk_logo = ctk.CTkImage(light_image=logo_image, dark_image=logo_image, size=(180, 60))
+            logo_label = ctk.CTkLabel(self.top_info_main_frame, image=self.ctk_logo, text="")
+            logo_label.grid(row=0, column=1, rowspan=3, padx=10, pady=15, sticky="ne") 
+        except FileNotFoundError:
+            log_message("Logo image not found at public/logo.png")
+        except Exception as e:
+            log_message(f"Error loading logo image: {e}")
 
         ctk.CTkLabel(self.top_info_main_frame, text="Endereço IPv4 Público:", font=ctk.CTkFont(size=16, weight="bold")).grid(row=0, column=0, sticky="nw", pady=5, padx=10)
         self.public_ip_label = ctk.CTkLabel(self.top_info_main_frame, text="Carregando...", font=ctk.CTkFont(size=16), wraplength=400, justify="left")
-        self.public_ip_label.grid(row=0, column=1, sticky="nw", pady=5, padx=10)
+        self.public_ip_label.grid(row=0, column=0, sticky="nw", pady=5, padx=10, columnspan=1)
 
         ctk.CTkLabel(self.top_info_main_frame, text="Servidores DNS do Sistema:", font=ctk.CTkFont(size=16, weight="bold")).grid(row=1, column=0, sticky="nw", pady=5, padx=10)
         self.system_dns_label = ctk.CTkLabel(self.top_info_main_frame, text="Carregando...", font=ctk.CTkFont(size=16), wraplength=400, justify="left")
-        self.system_dns_label.grid(row=1, column=1, sticky="nw", pady=5, padx=10)
+        self.system_dns_label.grid(row=1, column=0, sticky="nw", pady=5, padx=10, columnspan=1)
         
         self.show_adapters_button = ctk.CTkButton(self.top_info_main_frame, text="Ver Adaptadores de Rede", 
                                                   command=self.show_network_adapters_modal, 
-                                                  font=ctk.CTkFont(size=13, weight="bold"), corner_radius=8)
-        self.show_adapters_button.grid(row=2, column=0, columnspan=2, pady=10, padx=10, sticky="ew")
+                                                  font=ctk.CTkFont(size=13, weight="bold"), corner_radius=8,
+                                                  width=200, height=40)
+        self.show_adapters_button.grid(row=2, column=0, pady=10, padx=10, sticky="w")
 
         add_target_frame = ctk.CTkFrame(main_frame, corner_radius=10)
         add_target_frame.grid(row=1, column=0, columnspan=2, pady=10, padx=15, sticky="ew")
@@ -398,16 +417,41 @@ class NetworkMonitorApp:
 
         bottom_buttons_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
         bottom_buttons_frame.grid(row=3, column=0, columnspan=2, pady=10, sticky="ew")
-        bottom_buttons_frame.grid_columnconfigure((0,1,2), weight=1)
+        bottom_buttons_frame.grid_columnconfigure((0,1,2,3), weight=1)
 
-        self.start_button = ctk.CTkButton(bottom_buttons_frame, text="INICIAR TESTE", command=self.start_ping, font=ctk.CTkFont(size=16, weight="bold"), corner_radius=8)
+        self.start_button = ctk.CTkButton(bottom_buttons_frame, text="INICIAR TESTE", command=self.start_ping, font=ctk.CTkFont(size=16, weight="bold"), corner_radius=8,
+                                          width=150, height=40)
         self.start_button.grid(row=0, column=0, padx=10, pady=5, sticky="e")
 
-        self.stop_button = ctk.CTkButton(bottom_buttons_frame, text="PARAR TESTE", command=self.stop_ping, state="disabled", font=ctk.CTkFont(size=16, weight="bold"), corner_radius=8)
-        self.stop_button.grid(row=0, column=1, padx=10, pady=5, sticky="ew")
+        self.timer_test_button = ctk.CTkButton(bottom_buttons_frame, text="Timer Test", command=self.show_timer_test_modal, font=ctk.CTkFont(size=16, weight="bold"), corner_radius=8,
+                                                width=150, height=40)
+        self.timer_test_button.grid(row=0, column=1, padx=10, pady=5, sticky="ew")
 
-        self.show_stats_button = ctk.CTkButton(bottom_buttons_frame, text="Ver Estatísticas", command=self.show_statistics_modal, font=ctk.CTkFont(size=16, weight="bold"), corner_radius=8)
-        self.show_stats_button.grid(row=0, column=2, padx=10, pady=5, sticky="w")
+        self.stop_button = ctk.CTkButton(bottom_buttons_frame, text="PARAR TESTE", command=self.stop_ping, state="disabled", font=ctk.CTkFont(size=16, weight="bold"), corner_radius=8,
+                                         fg_color="#f55a00", hover_color="#f57200", text_color="#555555",
+                                         width=150, height=40)
+        self.stop_button.grid(row=0, column=2, padx=10, pady=5, sticky="ew")
+
+        self.show_stats_button = ctk.CTkButton(bottom_buttons_frame, text="Ver Estatísticas", command=self.show_statistics_modal, font=ctk.CTkFont(size=16, weight="bold"), corner_radius=8,
+                                               width=150, height=40)
+        self.show_stats_button.grid(row=0, column=3, padx=10, pady=5, sticky="w")
+
+        copyright_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
+        copyright_frame.grid(row=4, column=0, columnspan=2, pady=(10, 5), sticky="ew")
+        copyright_frame.grid_columnconfigure(0, weight=1)
+        
+        inner_copyright_frame = ctk.CTkFrame(copyright_frame, fg_color="transparent")
+        inner_copyright_frame.grid(row=0, column=0, columnspan=2, sticky="")
+        inner_copyright_frame.grid_columnconfigure(0, weight=1)
+        inner_copyright_frame.grid_columnconfigure(1, weight=0)
+        inner_copyright_frame.grid_columnconfigure(2, weight=1)
+
+        copyright_text_part1 = ctk.CTkLabel(inner_copyright_frame, text="© 2025 DNS_Ping Monitor de Rede | Desenvolvido por ", font=ctk.CTkFont(size=12))
+        copyright_text_part1.grid(row=0, column=0, sticky="e", padx=(0,0))
+
+        github_link_label = ctk.CTkLabel(inner_copyright_frame, text="Guilherme Wallace.", font=ctk.CTkFont(size=12, weight="bold"), text_color="blue", cursor="hand2")
+        github_link_label.grid(row=0, column=1, sticky="w", padx=(0,0))
+        github_link_label.bind("<Button-1>", lambda e: webbrowser.open_new("https://github.com/guilherme-wallace"))
 
     def create_ping_cards(self, parent_frame):
         for widget in parent_frame.winfo_children():
@@ -549,7 +593,8 @@ class NetworkMonitorApp:
     def start_ping(self):
         self.running = True
         self.start_button.configure(state="disabled")
-        self.stop_button.configure(state="normal")
+        self.timer_test_button.configure(state="disabled")
+        self.stop_button.configure(state="normal", text_color="white")
         self.ping_history.clear() 
         self.current_ping_stats = {target: {"sent": 0, "received": 0, "lost": 0} for target in self.ping_targets.values()} 
         self.overall_statistics_content = "Nenhum teste realizado. \n AVISO: O ping deve ser iniciado e finalizado para gerar estatísticas." 
@@ -563,13 +608,19 @@ class NetworkMonitorApp:
 
     def stop_ping(self):
         self.running = False
+        if self.timer_id:
+            self.master.after_cancel(self.timer_id)
+            self.timer_id = None
         self.start_button.configure(state="normal")
-        self.stop_button.configure(state="disabled")
+        self.timer_test_button.configure(state="normal")
+        self.stop_button.configure(state="disabled", text_color="#555555")
         self.generate_overall_statistics()
 
     def _ping_loop(self):
         while self.running:
             for name, target_address in list(self.ping_targets.items()):
+                if not self.running:
+                    break
                 result = ping_address(target_address)
                 result['target_name'] = name 
                 result['target_address'] = target_address
@@ -642,8 +693,26 @@ class NetworkMonitorApp:
                             self.ping_result_labels.get(target).configure(text_color="orange")
                         elif status == "Falha desconhecida" or "Erro:" in status:
                              self.ping_result_labels.get(target).configure(text_color="red")
-                        else:
-                            self.ping_result_labels.get(target).configure(text_color=ctk.get_appearance_mode())
+                elif item["type"] == "pdf_generated_ready_to_save":
+                    temp_path = item["temp_path"]
+                    loading_modal = item["loading_modal"]
+                    from tkinter import filedialog
+                    file_path = filedialog.asksaveasfilename(defaultextension=".pdf",
+                                                            filetypes=[("PDF files", "*.pdf")],
+                                                            title="Salvar Relatório de Rede")
+                    if file_path:
+                        shutil.move(temp_path, file_path)
+                        self.show_info_modal("PDF Gerado", f"Relatório salvo em:\n{file_path}")
+                    else:
+                        if os.path.exists(temp_path):
+                            os.remove(temp_path)
+                        self.show_info_modal("PDF Cancelado", "A geração do relatório PDF foi cancelada.")
+                    loading_modal.destroy()
+                elif item["type"] == "pdf_generation_error":
+                    loading_modal = item["loading_modal"]
+                    message = item["message"]
+                    self.show_info_modal("Erro ao Gerar PDF", message)
+                    loading_modal.destroy()
         except Empty:
             pass
         finally:
@@ -775,108 +844,139 @@ class NetworkMonitorApp:
         loading_modal.title("Gerando PDF")
         loading_modal.geometry("300x150")
         loading_modal.transient(self.master)
-        loading_modal.grab_set()
         loading_label = ctk.CTkLabel(loading_modal, text="Gerando relatório PDF...\nIsso pode levar um momento.", font=ctk.CTkFont(size=14), wraplength=250, justify="center")
         loading_label.pack(expand=True, fill="both", padx=10, pady=10)
         
-        def _generate_pdf_async():
+        threading.Thread(target=self._generate_pdf_async, args=(loading_modal,)).start()
+
+    def _generate_pdf_async(self, loading_modal):
+        try:
+            pdf = FPDF()
+            pdf.add_page()
+            pdf.set_font("Arial", size=12)
+
             try:
-                pdf = FPDF()
-                pdf.add_page()
-                pdf.set_font("Arial", size=12)
+                logo_path = "public/logo2.png"
+                logo_width = 120
+                logo_height = 50 
+                
+                page_width = pdf.w
+                x_pos_logo = (page_width - logo_width) / 2
 
-                pdf.set_font("Arial", "B", 20)
-                pdf.cell(0, 10, "Relatório de Monitoramento de Rede", 0, 1, "C")
-                pdf.ln(10)
+                img_bg_width = logo_width + 10
+                img_bg_height = logo_height + 10
+                
+                temp_img = Image.new('RGBA', (int(img_bg_width * 2), int(img_bg_height * 2)), (0, 0, 0, 0))
+                draw = ImageDraw.Draw(temp_img)
+                
+                draw.rounded_rectangle((0, 0, temp_img.width, temp_img.height), radius=10, fill=(0, 0, 139, 255))
 
-                pdf.set_font("Arial", "B", 14)
-                pdf.cell(0, 10, "Informações Gerais da Rede", 0, 1, "L")
-                pdf.set_font("Arial", size=12)
-                pdf.cell(0, 7, f"IP Público: {self.last_network_details.get('public_ipv4', 'N/A')}", 0, 1)
-                pdf.cell(0, 7, f"Servidores DNS do Sistema: {self.last_network_details.get('system_dns_servers_str', 'N/A')}", 0, 1)
-                pdf.ln(5)
+                logo_img = Image.open(logo_path).convert("RGBA")
+                logo_img = logo_img.resize((int(logo_width * 2), int(logo_height * 2)), Image.LANCZOS)
+                
+                paste_x = (temp_img.width - logo_img.width) // 2
+                paste_y = (temp_img.height - logo_img.height) // 2
+                temp_img.paste(logo_img, (paste_x, paste_y), logo_img)
+                
+                temp_logo_path = "temp_logo_with_bg.png"
+                temp_img.save(temp_logo_path)
 
-                pdf.set_font("Arial", "B", 14)
-                pdf.cell(0, 10, "Detalhes dos Adaptadores de Rede", 0, 1, "L")
-                if self.last_network_details.get("adapters"):
-                    for adapter_name, info in self.last_network_details["adapters"].items():
-                        pdf.set_font("Arial", "B", 12)
-                        pdf.cell(0, 7, f"Adaptador: {adapter_name}", 0, 1)
-                        pdf.set_font("Arial", size=10)
-                        pdf.cell(0, 5, f"  IPv4: {info.get('ipv4', 'N/A')}", 0, 1)
-                        pdf.cell(0, 5, f"  IPv6: {info.get('ipv6', 'N/A')}", 0, 1)
-                        pdf.cell(0, 5, f"  Gateway: {info.get('gateway', 'N/A')}", 0, 1)
-                        pdf.cell(0, 5, f"  Status: {info.get('status', 'N/A')}", 0, 1)
-                        pdf.cell(0, 5, f"  Velocidade: {info.get('speed', 'N/A')}", 0, 1)
-                        pdf.ln(3)
-                else:
-                    pdf.set_font("Arial", size=12)
-                    pdf.cell(0, 7, "Nenhum adaptador de rede encontrado.", 0, 1)
-                pdf.ln(5)
+                pdf.image(temp_logo_path, x=x_pos_logo, y=8, w=logo_width)
+                os.remove(temp_logo_path)
 
-                pdf.set_font("Arial", "B", 14)
-                pdf.cell(0, 10, "Estatísticas de Ping", 0, 1, "L")
-                pdf.set_font("Arial", size=12)
-                if not self.ping_history:
-                    pdf.cell(0, 7, "Nenhum teste de ping realizado.", 0, 1)
-                else:
-                    aggregated_stats = {}
-                    for entry in self.ping_history:
-                        target_address = entry.get('target_address')
-                        target_name = entry.get('target_name')
-                        if target_address:
-                            stats = aggregated_stats.setdefault(target_address, {"name": target_name, "sent": 0, "received": 0, "lost": 0, "rtts": []})
-                            stats["sent"] += entry.get("sent", 0)
-                            stats["received"] += entry.get("received", 0)
-                            stats["lost"] += entry.get("lost", 0)
-                            rtt_str = entry.get("rtt", "N/A")
-                            if rtt_str not in ("N/A", "Tempo limite", "Host não encontrado", "Falha desconhecida", "Erro:"):
-                                match = re.search(r'(\d+)', rtt_str)
-                                if match:
-                                    stats["rtts"].append(int(match.group(1)))
-                    
-                    sorted_targets = sorted(aggregated_stats.keys(), key=lambda k: aggregated_stats[k]["name"])
-
-                    for target_address in sorted_targets:
-                        stats = aggregated_stats[target_address]
-                        name = stats["name"]
-                        sent = stats.get("sent", 0)
-                        received = stats.get("received", 0)
-                        lost = stats.get("lost", 0)
-                        loss_percent = (lost / sent * 100) if sent > 0 else 0
-                        if sent == 0 and lost == 0: 
-                            loss_percent = 0
-
-                        rtts = stats.get("rtts", [])
-                        min_rtt = f"{min(rtts)}ms" if rtts else "N/A"
-                        max_rtt = f"{max(rtts)}ms" if rtts else "N/A"
-                        avg_rtt = f"{sum(rtts) / len(rtts):.1f}ms" if rtts else "N/A"
-                        
-                        pdf.set_font("Arial", "B", 12)
-                        pdf.cell(0, 7, f"Alvo: {name} ({target_address})", 0, 1)
-                        pdf.set_font("Arial", size=10)
-                        pdf.cell(0, 5, f"  Pacotes Enviados: {sent}, Recebidos: {received}, Perdidos: {lost}", 0, 1)
-                        pdf.cell(0, 5, f"  Perda: {loss_percent:.1f}%", 0, 1)
-                        pdf.cell(0, 5, f"  RTT Mín: {min_rtt}, Máx: {max_rtt}, Média: {avg_rtt}", 0, 1)
-                        pdf.ln(3)
-
-                from tkinter import filedialog
-                file_path = filedialog.asksaveasfilename(defaultextension=".pdf",
-                                                        filetypes=[("PDF files", "*.pdf")],
-                                                        title="Salvar Relatório de Rede")
-                if file_path:
-                    pdf.output(file_path)
-                    self.show_info_modal("PDF Gerado", f"Relatório salvo em:\n{file_path}")
-                else:
-                    self.show_info_modal("PDF Cancelado", "A geração do relatório PDF foi cancelada.")
-
+            except FileNotFoundError:
+                log_message("Logo2 image not found for PDF at public/logo2.png")
             except Exception as e:
-                self.show_info_modal("Erro ao Gerar PDF", f"Ocorreu um erro: {e}")
-                log_message(f"Erro ao gerar PDF: {e}")
-            finally:
-                loading_modal.destroy()
+                log_message(f"Error adding logo2 to PDF with background: {e}")
 
-        threading.Thread(target=_generate_pdf_async, daemon=True).start()
+            pdf.ln(logo_height + 1 / 2 + 20)
+            pdf.set_font("Arial", "B", 20)
+            pdf.cell(0, 10, "Relatório de Monitoramento de Rede", 0, 1, "C")
+            pdf.ln(10)
+
+            pdf.set_font("Arial", "B", 14)
+            pdf.cell(0, 10, "Informações Gerais da Rede", 0, 1, "L")
+            pdf.set_font("Arial", size=12)
+            pdf.cell(0, 7, f"IP Público: {self.last_network_details.get('public_ipv4', 'N/A')}", 0, 1)
+            pdf.cell(0, 7, f"Servidores DNS do Sistema: {self.last_network_details.get('system_dns_servers_str', 'N/A')}", 0, 1)
+            pdf.ln(5)
+
+            pdf.set_font("Arial", "B", 14)
+            pdf.cell(0, 10, "Detalhes dos Adaptadores de Rede", 0, 1, "L")
+            if self.last_network_details.get("adapters"):
+                for adapter_name, info in self.last_network_details["adapters"].items():
+                    pdf.set_font("Arial", "B", 12)
+                    pdf.cell(0, 7, f"Adaptador: {adapter_name}", 0, 1)
+                    pdf.set_font("Arial", size=10)
+                    pdf.cell(0, 5, f"  IPv4: {info.get('ipv4', 'N/A')}", 0, 1)
+                    pdf.cell(0, 5, f"  IPv6: {info.get('ipv6', 'N/A')}", 0, 1)
+                    pdf.cell(0, 5, f"  Gateway: {info.get('gateway', 'N/A')}", 0, 1)
+                    pdf.cell(0, 5, f"  Status: {info.get('status', 'N/A')}", 0, 1)
+                    pdf.cell(0, 5, f"  Velocidade: {info.get('speed', 'N/A')}", 0, 1)
+                    pdf.ln(3)
+            else:
+                pdf.set_font("Arial", size=12)
+                pdf.cell(0, 7, "Nenhum adaptador de rede encontrado.", 0, 1)
+            pdf.ln(5)
+
+            pdf.set_font("Arial", "B", 14)
+            pdf.cell(0, 10, "Estatísticas de Ping", 0, 1, "L")
+            pdf.set_font("Arial", size=12)
+            if not self.ping_history:
+                pdf.cell(0, 7, "Nenhum teste de ping realizado.", 0, 1)
+            else:
+                aggregated_stats = {}
+                for entry in self.ping_history:
+                    target_address = entry.get('target_address')
+                    target_name = entry.get('target_name')
+                    if target_address:
+                        stats = aggregated_stats.setdefault(target_address, {"name": target_name, "sent": 0, "received": 0, "lost": 0, "rtts": []})
+                        stats["sent"] += entry.get("sent", 0)
+                        stats["received"] += entry.get("received", 0)
+                        stats["lost"] += entry.get("lost", 0)
+                        rtt_str = entry.get("rtt", "N/A")
+                        if rtt_str not in ("N/A", "Tempo limite", "Host não encontrado", "Falha desconhecida", "Erro:"):
+                            match = re.search(r'(\d+)', rtt_str)
+                            if match:
+                                stats["rtts"].append(int(match.group(1)))
+                    
+                sorted_targets = sorted(aggregated_stats.keys(), key=lambda k: aggregated_stats[k]["name"])
+
+                for target_address in sorted_targets:
+                    stats = aggregated_stats[target_address]
+                    name = stats["name"]
+                    sent = stats.get("sent", 0)
+                    received = stats.get("received", 0)
+                    lost = stats.get("lost", 0)
+                    loss_percent = (lost / sent * 100) if sent > 0 else 0
+                    if sent == 0 and lost == 0: 
+                        loss_percent = 0
+
+                    rtts = stats.get("rtts", [])
+                    min_rtt = f"{min(rtts)}ms" if rtts else "N/A"
+                    max_rtt = f"{max(rtts)}ms" if rtts else "N/A"
+                    avg_rtt = f"{sum(rtts) / len(rtts):.1f}ms" if rtts else "N/A"
+                    
+                    pdf.set_font("Arial", "B", 12)
+                    pdf.cell(0, 7, f"Alvo: {name} ({target_address})", 0, 1)
+                    pdf.set_font("Arial", size=10)
+                    pdf.cell(0, 5, f"  Pacotes Enviados: {sent}, Recebidos: {received}, Perdidos: {lost}", 0, 1)
+                    pdf.cell(0, 5, f"  Perda: {loss_percent:.1f}%", 0, 1)
+                    pdf.cell(0, 5, f"  RTT Mín: {min_rtt}, Máx: {max_rtt}, Média: {avg_rtt}", 0, 1)
+                    pdf.ln(3)
+
+            pdf.ln(10)
+            pdf.set_font("Arial", size=10)
+            pdf.cell(0, 10, "© 2025 DNS_Ping Monitor de Rede | Desenvolvido por Guilherme Wallace.", 0, 1, "C")
+
+            temp_file_path = "temp_network_report.pdf"
+            pdf.output(temp_file_path)
+            
+            self.result_queue.put({"type": "pdf_generated_ready_to_save", "temp_path": temp_file_path, "loading_modal": loading_modal})
+
+        except Exception as e:
+            log_message(f"Erro ao gerar PDF no thread: {e}")
+            self.result_queue.put({"type": "pdf_generation_error", "message": f"Ocorreu um erro: {e}", "loading_modal": loading_modal})
 
 
     def show_statistics_modal(self):
@@ -907,8 +1007,52 @@ class NetworkMonitorApp:
         modal_window.protocol("WM_DELETE_WINDOW", modal_window.destroy) 
         modal_window.wait_window(modal_window) 
 
+    def show_timer_test_modal(self):
+        modal_window = ctk.CTkToplevel(self.master)
+        modal_window.title("Configurar Teste por Tempo")
+        modal_window.geometry("400x200")
+        modal_window.transient(self.master)
+        modal_window.grab_set()
 
-# --- Execução Principal ---
+        self.master.update_idletasks()
+        x = self.master.winfo_x() + (self.master.winfo_width() // 2) - (modal_window.winfo_width() // 2)
+        y = self.master.winfo_y() + (self.master.winfo_height() // 2) - (modal_window.winfo_height() // 2)
+        modal_window.geometry(f"+{x}+{y}")
+
+        ctk.CTkLabel(modal_window, text="Duração do teste (segundos):", font=ctk.CTkFont(size=14)).pack(pady=(15, 5))
+        self.timer_entry = ctk.CTkEntry(modal_window, placeholder_text="Ex: 60 (para 1 minuto)", font=ctk.CTkFont(size=14), corner_radius=8)
+        self.timer_entry.pack(pady=5)
+
+        start_timer_button = ctk.CTkButton(modal_window, text="Iniciar Teste com Timer", 
+                                           command=lambda: self._start_timed_ping(modal_window), 
+                                           font=ctk.CTkFont(size=13, weight="bold"), corner_radius=8)
+        start_timer_button.pack(pady=10)
+
+        modal_window.protocol("WM_DELETE_WINDOW", modal_window.destroy)
+        modal_window.wait_window(modal_window)
+
+    def _start_timed_ping(self, modal_window):
+        try:
+            duration_str = self.timer_entry.get().strip()
+            duration_seconds = int(duration_str)
+            if duration_seconds <= 0:
+                self.show_info_modal("Erro", "A duração deve ser um número positivo de segundos.")
+                return
+            
+            modal_window.destroy()
+
+            self.start_ping()
+
+            self.timer_id = self.master.after(duration_seconds * 1000, self.stop_ping)
+            self.show_info_modal("Teste Iniciado", f"O monitoramento de ping será executado por {duration_seconds} segundos.")
+
+        except ValueError:
+            self.show_info_modal("Erro", "Por favor, insira um número válido para a duração.")
+        except Exception as e:
+            self.show_info_modal("Erro", f"Ocorreu um erro ao iniciar o teste com timer: {e}")
+            log_message(f"Erro ao iniciar teste com timer: {e}")
+
+
 if __name__ == "__main__":
     open(LOG_FILE, "w").close() 
     log_message("Aplicação iniciada.")
