@@ -300,6 +300,16 @@ def perform_nslookup(target_address):
     except Exception as e:
         return f"Erro ao executar nslookup: {e}"
 
+def resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    try:
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+
+    return os.path.join(base_path, relative_path)
+
+
 class NetworkMonitorApp:
     def __init__(self, master):
         self.master = master
@@ -308,7 +318,7 @@ class NetworkMonitorApp:
         master.resizable(True, True)
 
         try:
-            self.master.iconbitmap("public/favicon.ico")
+            self.master.iconbitmap(resource_path("public/favicon.ico"))
         except Exception as e:
             log_message(f"Could not load favicon.ico: {e}")
 
@@ -367,7 +377,7 @@ class NetworkMonitorApp:
         self.top_info_main_frame.grid_columnconfigure(1, weight=0)
 
         try:
-            logo_image = Image.open("public/logo.png")
+            logo_image = Image.open(resource_path("public/logo.png"))
             logo_image = logo_image.resize((180, 60), Image.LANCZOS) 
             self.ctk_logo = ctk.CTkImage(light_image=logo_image, dark_image=logo_image, size=(180, 60))
             logo_label = ctk.CTkLabel(self.top_info_main_frame, image=self.ctk_logo, text="")
@@ -856,7 +866,7 @@ class NetworkMonitorApp:
             pdf.set_font("Arial", size=12)
 
             try:
-                logo_path = "public/logo2.png"
+                logo_path = resource_path("public/logo2.png")
                 logo_width = 120
                 logo_height = 50 
                 
